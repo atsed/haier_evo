@@ -66,6 +66,23 @@ class HaierWMListSelect(HaierSelect):
         self._device.set_attr_option(self._attr_code, option_value)
 
 
+class HaierWMProgramSelect(HaierSelect):
+
+    def __init__(self, device: api.HaierWMBase) -> None:
+        super().__init__(device)
+        self._attr_unique_id = f"{device.device_id}_{device.device_model}_program_select"
+        self._attr_name = f"{device.device_name} Программа"
+        self._attr_options = device.get_program_options()
+
+    @property
+    def current_option(self) -> str:
+        current = self._device.current_program
+        return current if current in self._attr_options else None
+
+    def set_option(self, value) -> None:
+        self._device.select_program(str(value))
+
+
 class HaierACEcoSensorSelect(HaierSelect):
     _attr_translation_key = "conditioner_eco_sensor"
 
