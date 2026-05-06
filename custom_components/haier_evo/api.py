@@ -800,6 +800,9 @@ class HaierDevice(object):
         device_cls = {
             "AC": HaierAC,
             "REF": HaierREF,
+            "WM": HaierWM,
+            "TD": HaierTD,
+            "WD": HaierWD,
         }.get(device_type, cls)
         if device_cls is cls:
             _LOGGER.warning(f"Unknown device type: {device_type}")
@@ -1328,6 +1331,319 @@ class HaierREF(HaierDevice):
         if self.config['door_open'] is not None:
             entities.append(binary_sensor.HaierREFDoorSensor(self))
         return entities
+
+
+class HaierWMBase(HaierDevice):
+    MACH_MODE_MAP = {
+        0: "ready",
+        1: "ready",
+        2: "running",
+        3: "pause",
+        4: "scheduled",
+        5: "scheduled",
+        6: "error",
+        7: "ready",
+        8: "test",
+        9: "ending",
+    }
+    WASHING_PR_PHASE_MAP = {
+        0: "ready",
+        1: "washing",
+        2: "washing",
+        3: "spin",
+        4: "rinse",
+        5: "rinse",
+        6: "rinse",
+        7: "drying",
+        8: "drying",
+        9: "steam",
+        10: "ready",
+        11: "spin",
+        12: "weighting",
+        13: "weighting",
+        14: "washing",
+        15: "washing",
+        16: "washing",
+        17: "rinse",
+        18: "rinse",
+        19: "scheduled",
+        20: "tumbling",
+        24: "refresh",
+        25: "washing",
+        26: "heating",
+        27: "washing",
+    }
+    TUMBLE_DRYER_PR_PHASE_MAP = {
+        0: "ready",
+        1: "heat_stroke",
+        2: "drying",
+        3: "cooldown",
+        8: "unknown",
+        11: "ready",
+        12: "unknown",
+        13: "cooldown",
+        14: "heat_stroke",
+        15: "heat_stroke",
+        16: "cooldown",
+        17: "unknown",
+        18: "tumbling",
+        19: "drying",
+        20: "drying",
+    }
+
+    def __init__(
+        self,
+        backend_data: dict = None,
+        **kwargs
+    ) -> None:
+        super().__init__(**kwargs)
+        self.attr_values: dict[str, str] = {}
+        self.attr_meta: dict[str, dict] = {}
+        self._enrich_attrs: dict[str, dict] = {}
+        self._get_status(backend_data)
+
+    def _load_config_from_attributes(self, data: dict) -> None:
+        enrich_attrs = (
+            self._status_data.get("enrichAttributes", {}).get("attrs", {})
+            if isinstance(self._status_data, dict)
+            else {}
+        )
+        self._enrich_attrs = enrich_attrs if isinstance(enrich_attrs, dict) else {}
+        attributes = data.setdefault("attributes", [])
+        self.attr_meta = {}
+        for raw in attributes:
+            code = str(raw.get("name", ""))
+            if not code:
+                continue
+            enrich = self._enrich_attrs.get(code, {})
+            list_titles = {}
+            for value, item in enrich.get("list", {}).get("valueToIcon", {}).items():
+                if isinstance(item, dict) and item.get("name"):
+                    list_titles[str(value)] = str(item.get("name"))
+            meta = {
+                "code": code,
+                "type": str(raw.get("type", "")).upper(),
+                "readable": bool(raw.get("readable", False)),
+                "writable": bool(raw.get("writable", False)),
+                "invisible": bool(raw.get("invisible", False)),
+                "description": str(
+                    enrich.get("title")
+                    or raw.get("description")
+                    or ""
+                ).strip() or f"Param {code}",
+                "current": raw.get("currentValue", raw.get("defaultValue")),
+                "range": raw.get("range", {}).get("data", {}),
+                "list": raw.get("list", {}).get("data", []),
+                "list_titles": list_titles,
+            }
+            self.attr_meta[code] = meta
+            self.attr_values[code] = str(meta["current"]) if meta["current"] is not None else ""
+
+    def _set_attribute_value(self, code: str, value: str) -> None:
+        code = str(code)
+        self.attr_values[code] = str(value) if value is not None else ""
+
+    def get_attr_value(self, code: str) -> str:
+        return self.attr_values.get(str(code), "")
+
+    def get_attr_label(self, code: str) -> str:
+        meta = self.attr_meta.get(str(code), {})
+        return str(meta.get("description") or f"Param {code}")
+
+    def get_attr_codes_for_sensor(self) -> list[str]:
+        result = [
+            code for code, meta in self.attr_meta.items()
+            if (
+                meta.get("readable")
+                and not meta.get("invisible")
+                and meta.get("type") == "STEP"
+            )
+        ]
+        enrich_codes = set(self._enrich_attrs.keys())
+        enriched = [code for code in result if code in enrich_codes]
+        return enriched or result
+
+    def _is_boolean_list(self, items: list[dict]) -> bool:
+        values = {str(i.get("data")).lower() for i in items}
+        return values.issubset({"0", "1", "true", "false"}) and len(values) == 2
+
+    def get_attr_codes_for_switch(self) -> list[str]:
+        result = []
+        for code, meta in self.attr_meta.items():
+            items = meta.get("list") or []
+            if not (meta.get("writable") and meta.get("type") == "LIST" and items):
+                continue
+            if self._is_boolean_list(items):
+                result.append(code)
+        enrich_codes = set(self._enrich_attrs.keys())
+        enriched = [code for code in result if code in enrich_codes]
+        return enriched or result
+
+    def get_attr_codes_for_select(self) -> list[str]:
+        result = []
+        for code, meta in self.attr_meta.items():
+            items = meta.get("list") or []
+            if not (meta.get("writable") and meta.get("type") == "LIST" and items):
+                continue
+            if not self._is_boolean_list(items):
+                result.append(code)
+        enrich_codes = set(self._enrich_attrs.keys())
+        enriched = [code for code in result if code in enrich_codes]
+        return enriched or result
+
+    def get_attr_options(self, code: str) -> list[str]:
+        options = []
+        for item in self.attr_meta.get(str(code), {}).get("list", []):
+            value = item.get("data")
+            if value is None:
+                continue
+            options.append(str(value))
+        return options
+
+    def get_attr_option_name(self, code: str, value: str) -> str:
+        value = str(value)
+        meta = self.attr_meta.get(str(code), {})
+        named = meta.get("list_titles", {})
+        if value in named:
+            return named[value]
+        for item in meta.get("list", []):
+            if str(item.get("data")) == value:
+                item_name = str(item.get("name", "")).strip()
+                if item_name and item_name != "not found":
+                    return item_name
+        return value
+
+    def get_attr_option_names(self, code: str) -> list[str]:
+        return [self.get_attr_option_name(code, value) for value in self.get_attr_options(code)]
+
+    def get_attr_option_value(self, code: str, option_name: str) -> str:
+        option_name = str(option_name)
+        meta = self.attr_meta.get(str(code), {})
+        for value, name in meta.get("list_titles", {}).items():
+            if str(name) == option_name:
+                return str(value)
+        return option_name
+
+    def get_attr_current_option_name(self, code: str) -> str:
+        return self.get_attr_option_name(code, self.get_attr_value(code))
+
+    def set_attr_option(self, code: str, value: str) -> None:
+        value = str(value)
+        self._send_commands([{
+            "commandName": str(code),
+            "value": value,
+        }])
+        self.attr_values[str(code)] = value
+
+    def set_attr_switch(self, code: str, value: bool) -> None:
+        values = {v.lower() for v in self.get_attr_options(code)}
+        if "true" in values or "false" in values:
+            command_value = "true" if value else "false"
+        else:
+            command_value = "1" if value else "0"
+        self.set_attr_option(code, command_value)
+
+    def create_entities_sensor(self) -> list:
+        from . import sensor
+        entities = [
+            sensor.HaierWMStepSensor(self, code)
+            for code in self.get_attr_codes_for_sensor()
+        ]
+        entities.append(sensor.HaierWMProgramSensor(self))
+        entities.append(sensor.HaierWMProgramStatusSensor(self))
+        entities.append(sensor.HaierWMMachineStateSensor(self))
+        entities.append(sensor.HaierWMPhaseSensor(self))
+        return entities
+
+    def create_entities_switch(self) -> list:
+        from . import switch
+        return [switch.HaierWMBoolSwitch(self, code) for code in self.get_attr_codes_for_switch()]
+
+    def create_entities_select(self) -> list:
+        from . import select
+        return [select.HaierWMListSelect(self, code) for code in self.get_attr_codes_for_select()]
+
+    def create_entities_binary_sensor(self) -> list:
+        from . import binary_sensor
+        return [
+            binary_sensor.HaierWMRunningSensor(self),
+            binary_sensor.HaierWMPausedSensor(self),
+            binary_sensor.HaierWMScheduledSensor(self),
+            binary_sensor.HaierWMErrorSensor(self),
+        ]
+
+    @property
+    def current_program(self) -> str:
+        return str(
+            self.status_data.get("control", {})
+            .get("currentProgram", {})
+            .get("title")
+            or ""
+        )
+
+    @property
+    def current_program_status(self) -> str:
+        return str(
+            self.status_data.get("control", {})
+            .get("currentProgram", {})
+            .get("status")
+            or ""
+        )
+
+    def get_attr_int(self, code: str, default: int = -1) -> int:
+        try:
+            return int(float(self.get_attr_value(code)))
+        except (TypeError, ValueError):
+            return default
+
+    @property
+    def machine_mode_code(self) -> int:
+        return self.get_attr_int("19")
+
+    @property
+    def machine_mode(self) -> str:
+        return self.MACH_MODE_MAP.get(self.machine_mode_code, "unknown")
+
+    @property
+    def phase_code(self) -> int:
+        return self.get_attr_int("18")
+
+    @property
+    def phase(self) -> str:
+        phase_map = (
+            self.TUMBLE_DRYER_PR_PHASE_MAP
+            if isinstance(self, HaierTD)
+            else self.WASHING_PR_PHASE_MAP
+        )
+        return phase_map.get(self.phase_code, "unknown")
+
+    @property
+    def is_running(self) -> bool:
+        return self.machine_mode == "running"
+
+    @property
+    def is_paused(self) -> bool:
+        return self.machine_mode == "pause"
+
+    @property
+    def is_scheduled(self) -> bool:
+        return self.machine_mode == "scheduled"
+
+    @property
+    def is_error(self) -> bool:
+        return self.machine_mode == "error"
+
+
+class HaierWM(HaierWMBase):
+    pass
+
+
+class HaierTD(HaierWMBase):
+    pass
+
+
+class HaierWD(HaierWMBase):
+    pass
 
 
 def parsebool(value) -> bool:

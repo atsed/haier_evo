@@ -76,3 +76,55 @@ class HaierREFSuperCoolingSensor(HaierREFBinarySensor):
         self._device_attr_name = "super_cooling"
         self._attr_unique_id = f"{device.device_id}_{device.device_model}_super_cooling"
         self._attr_name = f"{device.device_name} Супер-охлаждение"
+
+
+class HaierWMBinarySensor(HaierBinarySensor):
+    _attr_icon = "mdi:washing-machine"
+
+
+class HaierWMRunningSensor(HaierWMBinarySensor):
+
+    def __init__(self, device: api.HaierWMBase) -> None:
+        super().__init__(device)
+        self._attr_unique_id = f"{device.device_id}_{device.device_model}_running"
+        self._attr_name = f"{device.device_name} Выполняется"
+
+    @property
+    def is_on(self) -> bool:
+        return self._device.is_running
+
+
+class HaierWMPausedSensor(HaierWMBinarySensor):
+
+    def __init__(self, device: api.HaierWMBase) -> None:
+        super().__init__(device)
+        self._attr_unique_id = f"{device.device_id}_{device.device_model}_paused"
+        self._attr_name = f"{device.device_name} На паузе"
+
+    @property
+    def is_on(self) -> bool:
+        return self._device.is_paused
+
+
+class HaierWMScheduledSensor(HaierWMBinarySensor):
+
+    def __init__(self, device: api.HaierWMBase) -> None:
+        super().__init__(device)
+        self._attr_unique_id = f"{device.device_id}_{device.device_model}_scheduled"
+        self._attr_name = f"{device.device_name} Запланирована"
+
+    @property
+    def is_on(self) -> bool:
+        return self._device.is_scheduled
+
+
+class HaierWMErrorSensor(HaierWMBinarySensor):
+
+    def __init__(self, device: api.HaierWMBase) -> None:
+        super().__init__(device)
+        self._attr_unique_id = f"{device.device_id}_{device.device_model}_error"
+        self._attr_name = f"{device.device_name} Ошибка"
+
+    @property
+    def is_on(self) -> bool:
+        return self._device.is_error

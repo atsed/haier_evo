@@ -56,6 +56,26 @@ class HaierSwitch(SwitchEntity):
         return bool(getattr(self._device, self._device_attr_name, None))
 
 
+class HaierWMBoolSwitch(HaierSwitch):
+
+    def __init__(self, device: api.HaierWMBase, attr_code: str) -> None:
+        super().__init__(device)
+        self._attr_code = str(attr_code)
+        self._attr_unique_id = f"{device.device_id}_{device.device_model}_attr_{self._attr_code}_switch"
+        self._attr_name = f"{device.device_name} {device.get_attr_label(self._attr_code)}"
+
+    @property
+    def is_on(self) -> bool:
+        value = str(self._device.get_attr_value(self._attr_code)).lower()
+        return value in ("1", "true", "on", "enable")
+
+    def turn_on(self) -> None:
+        self._device.set_attr_switch(self._attr_code, True)
+
+    def turn_off(self, **kwargs) -> None:
+        self._device.set_attr_switch(self._attr_code, False)
+
+
 class HaierACLightSwitch(HaierSwitch):
     _attr_icon = "mdi:lightbulb"
 

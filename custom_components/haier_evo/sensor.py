@@ -39,6 +39,71 @@ class HaierSensor(SensorEntity):
         return getattr(self._device, self._device_attr_name, 0.0)
 
 
+class HaierWMStepSensor(HaierSensor):
+
+    def __init__(self, device: api.HaierWMBase, attr_code: str):
+        super().__init__(device)
+        self._attr_code = str(attr_code)
+        self._attr_unique_id = f"{device.device_id}_{device.device_model}_attr_{self._attr_code}_sensor"
+        self._attr_name = f"{device.device_name} {device.get_attr_label(self._attr_code)}"
+
+    @property
+    def native_value(self):
+        value = self._device.get_attr_value(self._attr_code)
+        try:
+            return float(value)
+        except (ValueError, TypeError):
+            return value
+
+
+class HaierWMProgramSensor(HaierSensor):
+
+    def __init__(self, device: api.HaierWMBase):
+        super().__init__(device)
+        self._attr_unique_id = f"{device.device_id}_{device.device_model}_current_program"
+        self._attr_name = f"{device.device_name} Текущая программа"
+
+    @property
+    def native_value(self):
+        return self._device.current_program
+
+
+class HaierWMProgramStatusSensor(HaierSensor):
+
+    def __init__(self, device: api.HaierWMBase):
+        super().__init__(device)
+        self._attr_unique_id = f"{device.device_id}_{device.device_model}_current_program_status"
+        self._attr_name = f"{device.device_name} Статус программы"
+
+    @property
+    def native_value(self):
+        return self._device.current_program_status
+
+
+class HaierWMMachineStateSensor(HaierSensor):
+
+    def __init__(self, device: api.HaierWMBase):
+        super().__init__(device)
+        self._attr_unique_id = f"{device.device_id}_{device.device_model}_machine_state"
+        self._attr_name = f"{device.device_name} Состояние машины"
+
+    @property
+    def native_value(self):
+        return self._device.machine_mode
+
+
+class HaierWMPhaseSensor(HaierSensor):
+
+    def __init__(self, device: api.HaierWMBase):
+        super().__init__(device)
+        self._attr_unique_id = f"{device.device_id}_{device.device_model}_phase"
+        self._attr_name = f"{device.device_name} Фаза цикла"
+
+    @property
+    def native_value(self):
+        return self._device.phase
+
+
 class HaierREFTemperatureSensor(HaierSensor):
     _attr_device_class = TEMPERATURE
     _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
