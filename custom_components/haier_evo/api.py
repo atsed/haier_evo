@@ -472,12 +472,14 @@ class Haier(object):
                 parsed_link = urlparse(device_link)
                 query_params = parse_qs(parsed_link.query)
                 device_type = query_params.setdefault('type', ['UNKNOWN'])[0]
+                device_uitype = query_params.get('uitype', [''])[0]
                 device_mac = query_params.get('deviceId', [''])[0]
                 device_mac = device_mac.replace('%3A', ':')
                 device_serial = query_params.get('serialNum', [''])[0]
                 device = HaierDevice.create(
                     haier=self,
                     device_type=device_type,
+                    device_uitype=device_uitype,
                     device_mac=device_mac,
                     device_serial=device_serial,
                     device_title=device_title,
@@ -794,18 +796,48 @@ class HaierDevice(object):
         haier: Haier,
         device_type: str,
         device_mac: str,
+        device_uitype: str = "",
         device_serial: str = None,
         device_title: str = None,
     ) -> HaierDevice:
+        normalized_type = str(device_type or "").upper()
+        normalized_uitype = str(device_uitype or "").upper()
+        normalized_title = str(device_title or "").lower()
+        aliases = {
+            "WM_BASE": "WM",
+            "TD_BASE": "TD",
+            "WD_BASE": "WD",
+            "WASHER": "WM",
+            "DRYER": "TD",
+            "WASHER_DRYER": "WD",
+        }
+        if normalized_type in aliases:
+            normalized_type = aliases[normalized_type]
+        if normalized_type not in {"AC", "REF", "WM", "TD", "WD"}:
+            if "WM" in normalized_uitype:
+                normalized_type = "WM"
+            elif "TD" in normalized_uitype or "DRY" in normalized_uitype:
+                normalized_type = "TD"
+            elif "WD" in normalized_uitype:
+                normalized_type = "WD"
+            elif "wash" in normalized_title or "стирал" in normalized_title:
+                normalized_type = "WM"
+            elif "dry" in normalized_title or "суш" in normalized_title:
+                normalized_type = "TD"
         device_cls = {
             "AC": HaierAC,
             "REF": HaierREF,
             "WM": HaierWM,
             "TD": HaierTD,
             "WD": HaierWD,
-        }.get(device_type, cls)
+        }.get(normalized_type, cls)
         if device_cls is cls:
-            _LOGGER.warning(f"Unknown device type: {device_type}")
+            _LOGGER.warning(
+                "Unknown device type: type=%s, uitype=%s, title=%s",
+                device_type,
+                device_uitype,
+                device_title,
+            )
         return device_cls(
             haier=haier,
             device_mac=device_mac,
@@ -1561,7 +1593,10 @@ class HaierWMBase(HaierDevice):
 
     def create_entities_select(self) -> list:
         from . import select
-        return [select.HaierWMListSelect(self, code) for code in self.get_attr_codes_for_select()]
+        entities = [select.HaierWMListSelect(self, code) for code in self.get_attr_codes_for_select()]
+        if self.get_program_options():
+            entities.append(select.HaierWMProgramSelect(self))
+        return entities
 
     def create_entities_binary_sensor(self) -> list:
         from . import binary_sensor
@@ -1589,6 +1624,44 @@ class HaierWMBase(HaierDevice):
             .get("status")
             or ""
         )
+
+    def get_program_options(self) -> list[str]:
+        options = []
+        blocks = self.status_data.get("allProgram", {}).get("blocks", [])
+        for block in blocks:
+            for program in block.get("programs", []):
+                name = str(
+                    program.get("preview", {}).get("name")
+                    or program.get("detail", {}).get("name")
+                    or program.get("templateId")
+                    or ""
+                ).strip()
+                if name and name not in options:
+                    options.append(name)
+        return options
+
+    def select_program(self, name: str) -> bool:
+        blocks = self.status_data.get("allProgram", {}).get("blocks", [])
+        for block in blocks:
+            for program in block.get("programs", []):
+                program_name = str(
+                    program.get("preview", {}).get("name")
+                    or program.get("detail", {}).get("name")
+                    or program.get("templateId")
+                    or ""
+                ).strip()
+                if program_name != str(name):
+                    continue
+                selected_values = program.get("programConfig", {}).get("selectedValues", [])
+                commands = [{
+                    "commandName": str(v.get("attrName")),
+                    "value": str(v.get("attrValue")),
+                } for v in selected_values if v.get("attrName") is not None]
+                if commands:
+                    self._send_group_command(commands)
+                    self.write_ha_state()
+                    return True
+        return False
 
     def get_attr_int(self, code: str, default: int = -1) -> int:
         try:
