@@ -128,3 +128,16 @@ class HaierWMErrorSensor(HaierWMBinarySensor):
     @property
     def is_on(self) -> bool:
         return self._device.is_error
+
+
+class HaierWMRemoteControlSensor(HaierWMBinarySensor):
+    _attr_icon = "mdi:remote"
+
+    def __init__(self, device: api.HaierWMBase) -> None:
+        super().__init__(device)
+        self._attr_unique_id = f"{device.device_id}_{device.device_model}_remote_control"
+        self._attr_name = f"{device.device_name} Дистанционное управление"
+
+    @property
+    def is_on(self) -> bool:
+        return self._device.remote_control_enabled

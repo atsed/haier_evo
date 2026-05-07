@@ -774,7 +774,13 @@ class HaierDevice(object):
         if message_type == "status":
             self._handle_status_update(message_dict)
         elif message_type == "command_response":
-            pass
+            err_no = message_dict.get("errNo")
+            if err_no and int(err_no) != 0:
+                _LOGGER.warning(
+                    "%s: Command failed with errNo=%s, trace=%s, raw=%s",
+                    self.device_name, err_no,
+                    message_dict.get("trace"), message_dict,
+                )
         elif message_type == "info":
             self._handle_info(message_dict)
         elif message_type == "deviceStatusEvent":
@@ -1465,6 +1471,7 @@ class HaierWMBase(HaierDevice):
         self._enrich_attrs: dict[str, dict] = {}
         self._control_block: dict = {}
         self._active_program: dict = {}
+        self._remote_control_attr: str | None = None
         self._get_status(backend_data)
 
     def _load_config_from_attributes(self, data: dict) -> None:
@@ -1494,6 +1501,7 @@ class HaierWMBase(HaierDevice):
                 "readable": bool(raw.get("readable", False)),
                 "writable": bool(raw.get("writable", False)),
                 "invisible": bool(raw.get("invisible", False)),
+                "operationType": str(raw.get("operationType", "")).upper(),
                 "description": str(
                     enrich.get("title")
                     or raw.get("description")
@@ -1508,6 +1516,11 @@ class HaierWMBase(HaierDevice):
             self.attr_values[code] = str(meta["current"]) if meta["current"] is not None else ""
         self._config = CFG.HaierWMConfig(command_name or "8")
         self._control_block = data.get("controlBlock", {})
+        self._remote_control_attr = (
+            self._status_data.get("remoteControlMode", {})
+            .get("link", {})
+            .get("name")
+        )
 
     def _set_attribute_value(self, code: str, value: str) -> None:
         code = str(code)
@@ -1607,14 +1620,23 @@ class HaierWMBase(HaierDevice):
 
     def set_attr_option(self, code: str, value: str) -> None:
         value = str(value)
+        meta = self.attr_meta.get(str(code), {})
+        op_type = meta.get("operationType", "G")
+        if not self.remote_control_enabled:
+            _LOGGER.warning(
+                "%s: Remote control is disabled on the device. "
+                "Enable it on the machine panel to send commands.",
+                self.device_name,
+            )
         _LOGGER.debug(
-            "%s: set_attr_option code=%s value=%s",
-            self.device_name, code, value
+            "%s: set_attr_option code=%s value=%s operationType=%s",
+            self.device_name, code, value, op_type
         )
-        self._send_commands([{
-            "commandName": str(code),
-            "value": value,
-        }])
+        command = {"commandName": str(code), "value": value}
+        if "G" in op_type:
+            self._send_group_command([command])
+        else:
+            self._send_single_command(command)
         self.attr_values[str(code)] = value
 
     def set_attr_switch(self, code: str, value: bool) -> None:
@@ -1667,6 +1689,7 @@ class HaierWMBase(HaierDevice):
             binary_sensor.HaierWMPausedSensor(self),
             binary_sensor.HaierWMScheduledSensor(self),
             binary_sensor.HaierWMErrorSensor(self),
+            binary_sensor.HaierWMRemoteControlSensor(self),
         ]
 
     def _handle_program_event(self, received_message: dict) -> None:
@@ -1839,6 +1862,13 @@ class HaierWMBase(HaierDevice):
     @property
     def is_error(self) -> bool:
         return self.machine_mode == "error"
+
+    @property
+    def remote_control_enabled(self) -> bool:
+        if self._remote_control_attr is None:
+            return True
+        val = str(self.get_attr_value(self._remote_control_attr)).lower()
+        return val in ("1", "true", "on")
 
 
 class HaierWM(HaierWMBase):
