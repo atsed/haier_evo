@@ -699,8 +699,18 @@ class HaierDevice(object):
 
     def _handle_status_update(self, received_message: dict) -> None:
         message_statuses = received_message.get("payload", {}).get("statuses", [{}])
-        for key, value in message_statuses[0]['properties'].items():
-            self._set_attribute_value(key, value)
+        _LOGGER.debug(
+            "%s: _handle_status_update statuses=%s",
+            self.device_name, message_statuses
+        )
+        try:
+            for key, value in message_statuses[0]['properties'].items():
+                self._set_attribute_value(key, value)
+        except (KeyError, IndexError, TypeError) as e:
+            _LOGGER.error(
+                "%s: Failed to parse status update: %s, raw=%s",
+                self.device_name, e, message_statuses
+            )
         self.available = True
         self.write_ha_state()
 
@@ -714,6 +724,7 @@ class HaierDevice(object):
         self.sw_version = payload.get("swVersion") or self.sw_version
 
     def _send_message(self, message: dict) -> None:
+        _LOGGER.debug("%s: _send_message %s", self.device_name, message)
         self._haier.send_message(json.dumps(message))
 
     def _send_commands(self, commands: list[dict]) -> None:
@@ -757,6 +768,9 @@ class HaierDevice(object):
 
     def on_message(self, message_dict: dict) -> None:
         message_type = message_dict.get("event", "")
+        _LOGGER.debug(
+            "%s: on_message event=%s", self.device_name, message_type
+        )
         if message_type == "status":
             self._handle_status_update(message_dict)
         elif message_type == "command_response":
@@ -1593,6 +1607,10 @@ class HaierWMBase(HaierDevice):
 
     def set_attr_option(self, code: str, value: str) -> None:
         value = str(value)
+        _LOGGER.debug(
+            "%s: set_attr_option code=%s value=%s",
+            self.device_name, code, value
+        )
         self._send_commands([{
             "commandName": str(code),
             "value": value,
@@ -1600,6 +1618,10 @@ class HaierWMBase(HaierDevice):
         self.attr_values[str(code)] = value
 
     def set_attr_switch(self, code: str, value: bool) -> None:
+        _LOGGER.debug(
+            "%s: set_attr_switch code=%s value=%s",
+            self.device_name, code, value
+        )
         values = {v.lower() for v in self.get_attr_options(code)}
         if "true" in values or "false" in values:
             command_value = "true" if value else "false"
@@ -1749,9 +1771,11 @@ class HaierWMBase(HaierDevice):
         return False
 
     def start_program(self) -> None:
+        _LOGGER.debug("%s: start_program", self.device_name)
         self._send_single_command({"commandName": "19", "value": "2"})
 
     def pause_program(self) -> None:
+        _LOGGER.debug("%s: pause_program", self.device_name)
         self._send_single_command({"commandName": "19", "value": "3"})
 
     def resume_program(self) -> None:
