@@ -1404,9 +1404,9 @@ class HaierREF(HaierDevice):
 
 class HaierWMBase(HaierDevice):
     MACH_MODE_MAP = {
-        0: "ready",
-        1: "ready",
-        2: "running",
+        0: "off",
+        1: "running",
+        2: "ready",
         3: "pause",
         4: "scheduled",
         5: "scheduled",
@@ -1472,6 +1472,7 @@ class HaierWMBase(HaierDevice):
         self._control_block: dict = {}
         self._active_program: dict = {}
         self._remote_control_attr: str | None = None
+        self._staged_changes: dict[str, str] = {}
         self._get_status(backend_data)
 
     def _load_config_from_attributes(self, data: dict) -> None:
@@ -1525,6 +1526,7 @@ class HaierWMBase(HaierDevice):
     def _set_attribute_value(self, code: str, value: str) -> None:
         code = str(code)
         self.attr_values[code] = str(value) if value is not None else ""
+        self._staged_changes.pop(code, None)
 
     def get_attr_value(self, code: str) -> str:
         return self.attr_values.get(str(code), "")
@@ -1619,30 +1621,24 @@ class HaierWMBase(HaierDevice):
         return self.get_attr_option_name(code, self.get_attr_value(code))
 
     def set_attr_option(self, code: str, value: str) -> None:
+        """Stage an attribute change locally (does NOT send to device).
+
+        For WM/TD devices, settings are accumulated and sent all at once
+        when start_program() is called.
+        """
         value = str(value)
-        meta = self.attr_meta.get(str(code), {})
-        op_type = meta.get("operationType", "G")
-        if not self.remote_control_enabled:
-            _LOGGER.warning(
-                "%s: Remote control is disabled on the device. "
-                "Enable it on the machine panel to send commands.",
-                self.device_name,
-            )
         _LOGGER.debug(
-            "%s: set_attr_option code=%s value=%s operationType=%s",
-            self.device_name, code, value, op_type
+            "%s: set_attr_option (staged) code=%s value=%s",
+            self.device_name, code, value,
         )
-        command = {"commandName": str(code), "value": value}
-        if "G" in op_type:
-            self._send_group_command([command])
-        else:
-            self._send_single_command(command)
         self.attr_values[str(code)] = value
+        self._staged_changes[str(code)] = value
+        self.write_ha_state()
 
     def set_attr_switch(self, code: str, value: bool) -> None:
         _LOGGER.debug(
             "%s: set_attr_switch code=%s value=%s",
-            self.device_name, code, value
+            self.device_name, code, value,
         )
         values = {v.lower() for v in self.get_attr_options(code)}
         if "true" in values or "false" in values:
@@ -1650,6 +1646,10 @@ class HaierWMBase(HaierDevice):
         else:
             command_value = "1" if value else "0"
         self.set_attr_option(code, command_value)
+
+    @property
+    def has_staged_changes(self) -> bool:
+        return bool(self._staged_changes)
 
     def create_entities_sensor(self) -> list:
         from . import sensor
@@ -1765,6 +1765,10 @@ class HaierWMBase(HaierDevice):
         return options
 
     def select_program(self, name: str) -> bool:
+        """Stage program selection locally (does NOT start the machine).
+
+        The program will be started when start_program() is called.
+        """
         blocks = self.status_data.get("allProgram", {}).get("blocks", [])
         for block in blocks:
             for program in block.get("programs", []):
@@ -1776,37 +1780,100 @@ class HaierWMBase(HaierDevice):
                 ).strip()
                 if program_name != str(name):
                     continue
-                selected_values = program.get("programConfig", {}).get("selectedValues", [])
-                if selected_values:
-                    commands = [{
-                        "commandName": str(v.get("attrName")),
-                        "value": str(v.get("attrValue")),
-                    } for v in selected_values if v.get("attrName") is not None]
-                else:
-                    template_id = program.get("templateId")
-                    if template_id is None:
-                        continue
-                    commands = [{"commandName": "0", "value": str(template_id)}]
-                if commands:
-                    self._send_group_command(commands)
-                    self.write_ha_state()
-                    return True
+                template_id = program.get("templateId")
+                if template_id is None:
+                    continue
+                _LOGGER.debug(
+                    "%s: select_program (staged) name=%s templateId=%s",
+                    self.device_name, name, template_id,
+                )
+                self.attr_values["0"] = str(template_id)
+                self._staged_changes["0"] = str(template_id)
+                selected_values = (
+                    program.get("programConfig", {}).get("selectedValues", [])
+                )
+                for v in selected_values:
+                    attr_name = v.get("attrName")
+                    attr_value = v.get("attrValue")
+                    if attr_name is not None and attr_value is not None:
+                        self.attr_values[str(attr_name)] = str(attr_value)
+                        self._staged_changes[str(attr_name)] = str(attr_value)
+                self.write_ha_state()
+                return True
         return False
 
+    def _build_start_commands(self) -> list[dict]:
+        """Build a group command list with all writable G/IG attributes."""
+        commands = []
+        for code, meta in self.attr_meta.items():
+            if code in self.SPECIAL_ATTR_CODES and code != "0":
+                continue
+            op_type = meta.get("operationType", "")
+            if "G" not in op_type:
+                continue
+            value = self.attr_values.get(code)
+            if value is None or value == "":
+                continue
+            commands.append({
+                "commandName": str(code),
+                "value": str(value),
+            })
+        return commands
+
     def start_program(self) -> None:
-        _LOGGER.debug("%s: start_program", self.device_name)
-        self._send_single_command({"commandName": "19", "value": "2"})
+        """Send all current attribute values as a group command to start."""
+        if not self.remote_control_enabled:
+            _LOGGER.warning(
+                "%s: Remote control is disabled. Enable it on the machine.",
+                self.device_name,
+            )
+            return
+        commands = self._build_start_commands()
+        if not commands:
+            _LOGGER.warning("%s: No commands to send for start", self.device_name)
+            return
+        _LOGGER.debug(
+            "%s: start_program, sending %d attrs",
+            self.device_name, len(commands),
+        )
+        self._send_group_command(commands)
+        self._staged_changes.clear()
 
     def pause_program(self) -> None:
-        _LOGGER.debug("%s: pause_program", self.device_name)
-        self._send_single_command({"commandName": "19", "value": "3"})
+        pause_val = (
+            self._control_block.get("pause", {})
+            .get("pauseValue", "2")
+        )
+        pause_attr = (
+            self._control_block.get("pause", {})
+            .get("link", {})
+            .get("name", "19")
+        )
+        _LOGGER.debug(
+            "%s: pause_program attr=%s value=%s",
+            self.device_name, pause_attr, pause_val,
+        )
+        self._send_single_command({
+            "commandName": pause_attr, "value": pause_val,
+        })
 
     def resume_program(self) -> None:
         resume_val = (
             self._control_block.get("resumeProgram", {})
             .get("resumeValue", "1")
         )
-        self._send_single_command({"commandName": "19", "value": resume_val})
+        resume_attr = (
+            self._control_block.get("resumeProgram", {})
+            .get("link", {})
+            .get("name", "19")
+        )
+        _LOGGER.debug(
+            "%s: resume_program attr=%s value=%s",
+            self.device_name, resume_attr, resume_val,
+        )
+        self._send_single_command({
+            "commandName": resume_attr, "value": resume_val,
+        })
 
     def cancel_program(self) -> None:
         cancel_val = (
@@ -1818,7 +1885,13 @@ class HaierWMBase(HaierDevice):
             .get("link", {})
             .get("name", "194")
         )
-        self._send_single_command({"commandName": cancel_attr, "value": cancel_val})
+        _LOGGER.debug(
+            "%s: cancel_program attr=%s value=%s",
+            self.device_name, cancel_attr, cancel_val,
+        )
+        self._send_single_command({
+            "commandName": cancel_attr, "value": cancel_val,
+        })
 
     def get_attr_int(self, code: str, default: int = -1) -> int:
         try:
