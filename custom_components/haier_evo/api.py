@@ -699,17 +699,13 @@ class HaierDevice(object):
 
     def _handle_status_update(self, received_message: dict) -> None:
         message_statuses = received_message.get("payload", {}).get("statuses", [{}])
-        _LOGGER.debug(
-            "%s: _handle_status_update statuses=%s",
-            self.device_name, message_statuses
-        )
         try:
             for key, value in message_statuses[0]['properties'].items():
                 self._set_attribute_value(key, value)
         except (KeyError, IndexError, TypeError) as e:
             _LOGGER.error(
-                "%s: Failed to parse status update: %s, raw=%s",
-                self.device_name, e, message_statuses
+                "%s: Failed to parse status update: %s",
+                self.device_name, e,
             )
         self.available = True
         self.write_ha_state()
@@ -724,7 +720,6 @@ class HaierDevice(object):
         self.sw_version = payload.get("swVersion") or self.sw_version
 
     def _send_message(self, message: dict) -> None:
-        _LOGGER.debug("%s: _send_message %s", self.device_name, message)
         self._haier.send_message(json.dumps(message))
 
     def _send_commands(self, commands: list[dict]) -> None:
@@ -739,7 +734,6 @@ class HaierDevice(object):
             "commands": commands,
             "trace": trace,
         }
-        _LOGGER.debug("Sending group command to %s: %s", self.device_id, payload)
         self._send_message(payload)
 
     def _send_single_command(self, command: dict) -> None:
@@ -750,7 +744,6 @@ class HaierDevice(object):
             "command": command,
             "trace": trace,
         }
-        _LOGGER.debug("Sending single command to %s: %s", self.device_id, payload)
         self._send_message(payload)
 
     def init_if_needed(self) -> None:
@@ -768,18 +761,14 @@ class HaierDevice(object):
 
     def on_message(self, message_dict: dict) -> None:
         message_type = message_dict.get("event", "")
-        _LOGGER.debug(
-            "%s: on_message event=%s", self.device_name, message_type
-        )
         if message_type == "status":
             self._handle_status_update(message_dict)
         elif message_type == "command_response":
             err_no = message_dict.get("errNo")
             if err_no and int(err_no) != 0:
                 _LOGGER.warning(
-                    "%s: Command failed with errNo=%s, trace=%s, raw=%s",
+                    "%s: Command failed (errNo=%s)",
                     self.device_name, err_no,
-                    message_dict.get("trace"), message_dict,
                 )
         elif message_type == "info":
             self._handle_info(message_dict)
@@ -790,7 +779,7 @@ class HaierDevice(object):
         elif message_type.startswith("Program") and message_type.endswith("Event"):
             self._handle_program_event(message_dict)
         else:
-            _LOGGER.warning(f"Got unknown message: {message_dict}")
+            _LOGGER.warning(f"Got unknown message type: {message_type}")
 
     def _handle_program_event(self, received_message: dict) -> None:
         pass
@@ -1627,19 +1616,11 @@ class HaierWMBase(HaierDevice):
         when start_program() is called.
         """
         value = str(value)
-        _LOGGER.debug(
-            "%s: set_attr_option (staged) code=%s value=%s",
-            self.device_name, code, value,
-        )
         self.attr_values[str(code)] = value
         self._staged_changes[str(code)] = value
         self.write_ha_state()
 
     def set_attr_switch(self, code: str, value: bool) -> None:
-        _LOGGER.debug(
-            "%s: set_attr_switch code=%s value=%s",
-            self.device_name, code, value,
-        )
         values = {v.lower() for v in self.get_attr_options(code)}
         if "true" in values or "false" in values:
             command_value = "true" if value else "false"
@@ -1783,10 +1764,6 @@ class HaierWMBase(HaierDevice):
                 template_id = program.get("templateId")
                 if template_id is None:
                     continue
-                _LOGGER.debug(
-                    "%s: select_program (staged) name=%s templateId=%s",
-                    self.device_name, name, template_id,
-                )
                 self.attr_values["0"] = str(template_id)
                 self._staged_changes["0"] = str(template_id)
                 selected_values = (
@@ -1824,20 +1801,14 @@ class HaierWMBase(HaierDevice):
         """Send all current attribute values as a group command to start."""
         if not self.remote_control_enabled:
             _LOGGER.warning(
-                "%s: Remote control is disabled. Enable it on the machine.",
+                "%s: Remote control is disabled on the device",
                 self.device_name,
             )
             return
         commands = self._build_start_commands()
-        if not commands:
-            _LOGGER.warning("%s: No commands to send for start", self.device_name)
-            return
-        _LOGGER.debug(
-            "%s: start_program, sending %d attrs",
-            self.device_name, len(commands),
-        )
-        self._send_group_command(commands)
-        self._staged_changes.clear()
+        if commands:
+            self._send_group_command(commands)
+            self._staged_changes.clear()
 
     def pause_program(self) -> None:
         pause_val = (
@@ -1848,10 +1819,6 @@ class HaierWMBase(HaierDevice):
             self._control_block.get("pause", {})
             .get("link", {})
             .get("name", "19")
-        )
-        _LOGGER.debug(
-            "%s: pause_program attr=%s value=%s",
-            self.device_name, pause_attr, pause_val,
         )
         self._send_single_command({
             "commandName": pause_attr, "value": pause_val,
@@ -1867,10 +1834,6 @@ class HaierWMBase(HaierDevice):
             .get("link", {})
             .get("name", "19")
         )
-        _LOGGER.debug(
-            "%s: resume_program attr=%s value=%s",
-            self.device_name, resume_attr, resume_val,
-        )
         self._send_single_command({
             "commandName": resume_attr, "value": resume_val,
         })
@@ -1884,10 +1847,6 @@ class HaierWMBase(HaierDevice):
             self._control_block.get("cancel", {})
             .get("link", {})
             .get("name", "194")
-        )
-        _LOGGER.debug(
-            "%s: cancel_program attr=%s value=%s",
-            self.device_name, cancel_attr, cancel_val,
         )
         self._send_single_command({
             "commandName": cancel_attr, "value": cancel_val,
