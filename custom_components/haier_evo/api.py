@@ -721,22 +721,26 @@ class HaierDevice(object):
 
     def _send_group_command(self, commands: list[dict]) -> None:
         trace = str(uuid.uuid4())
-        self._send_message({
+        payload = {
             "action": "operation",
             "macAddress": self.device_id,
             "commandName": self.config.command_name,
             "commands": commands,
             "trace": trace,
-        })
+        }
+        _LOGGER.debug("Sending group command to %s: %s", self.device_id, payload)
+        self._send_message(payload)
 
     def _send_single_command(self, command: dict) -> None:
         trace = str(uuid.uuid4())
-        self._send_message({
+        payload = {
             "action": "command",
             "macAddress": self.device_id,
             "command": command,
             "trace": trace,
-        })
+        }
+        _LOGGER.debug("Sending single command to %s: %s", self.device_id, payload)
+        self._send_message(payload)
 
     def init_if_needed(self) -> None:
         pass
@@ -761,8 +765,15 @@ class HaierDevice(object):
             self._handle_info(message_dict)
         elif message_type == "deviceStatusEvent":
             self._handle_device_status_update(message_dict)
+        elif message_type == "deviceConnectionStatusEvent":
+            pass
+        elif message_type.startswith("Program") and message_type.endswith("Event"):
+            self._handle_program_event(message_dict)
         else:
             _LOGGER.warning(f"Got unknown message: {message_dict}")
+
+    def _handle_program_event(self, received_message: dict) -> None:
+        pass
 
     def write_ha_state(self) -> None:
         for callback in self._write_ha_state_callbacks:
@@ -1439,6 +1450,7 @@ class HaierWMBase(HaierDevice):
         self.attr_meta: dict[str, dict] = {}
         self._enrich_attrs: dict[str, dict] = {}
         self._control_block: dict = {}
+        self._active_program: dict = {}
         self._get_status(backend_data)
 
     def _load_config_from_attributes(self, data: dict) -> None:
@@ -1635,8 +1647,28 @@ class HaierWMBase(HaierDevice):
             binary_sensor.HaierWMErrorSensor(self),
         ]
 
+    def _handle_program_event(self, received_message: dict) -> None:
+        data = received_message.get("data", {})
+        program = data.get("program", {})
+        if program:
+            self._active_program = program
+            selected_values = (
+                program.get("config", {}).get("selectedValues", [])
+            )
+            for sv in selected_values:
+                attr_name = sv.get("attrName")
+                attr_value = sv.get("attrValue")
+                if attr_name is not None and attr_value is not None:
+                    self._set_attribute_value(str(attr_name), str(attr_value))
+        status = data.get("status", "")
+        if status == "PROGRAM_FINISHED":
+            self._active_program = {}
+        self.write_ha_state()
+
     @property
     def current_program(self) -> str:
+        if self._active_program.get("title"):
+            return str(self._active_program["title"])
         title = (
             self.status_data.get("control", {})
             .get("currentProgram", {})
@@ -1651,6 +1683,8 @@ class HaierWMBase(HaierDevice):
 
     @property
     def current_program_status(self) -> str:
+        if self._active_program.get("status"):
+            return str(self._active_program["status"])
         return str(
             self.status_data.get("control", {})
             .get("currentProgram", {})
