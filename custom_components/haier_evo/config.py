@@ -190,6 +190,21 @@ class HaierACConfig(HaierDeviceConfig):
             self.attrs.append(Attribute(attr_copy))
 
 
+class HaierWMConfig(HaierDeviceConfig):
+
+    def __init__(self, command_name: str = "8") -> None:
+        self._model = ""
+        self._userpath = ""
+        self._config = {}
+        self._command_name = command_name
+        self._attrs_cache = {}
+        self.attrs = []
+        self.constraint = Constraint([])
+
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}(command_name={self.command_name!r})"
+
+
 class HaierREFConfig(HaierDeviceConfig):
 
     def __repr__(self) -> str:

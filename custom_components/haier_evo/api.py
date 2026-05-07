@@ -676,16 +676,18 @@ class HaierDevice(object):
 
     def _get_status(self, data: dict) -> dict:
         self._status_data = data = (data or {})
+        sdc = data.get("smartDeviceControl")
+        if isinstance(sdc, dict):
+            data.update(sdc)
         info = data.setdefault("info", {})
         self.device_serial = info.setdefault("serialNumber", self.device_serial)
-        device_model = info.setdefault("model", "AC")
+        device_model = info.setdefault("model", "UNKNOWN")
         device_model = device_model.replace('-','').replace('/', '')[:11]
         self.device_model = device_model
         self.available = data.setdefault("status", "ONLINE")
         settings = data.setdefault("settings", {})
         self.device_name = settings.setdefault("name", {}).setdefault("name", self.device_name)
         self.sw_version = settings.setdefault('firmware', {}).setdefault('value', None)
-        # read config and current values
         self._load_config_from_attributes(data)
         return data
 
@@ -788,6 +790,10 @@ class HaierDevice(object):
 
     # noinspection PyMethodMayBeStatic
     def create_entities_binary_sensor(self) -> list:
+        return []
+
+    # noinspection PyMethodMayBeStatic
+    def create_entities_button(self) -> list:
         return []
 
     @classmethod
@@ -1432,6 +1438,7 @@ class HaierWMBase(HaierDevice):
         self.attr_values: dict[str, str] = {}
         self.attr_meta: dict[str, dict] = {}
         self._enrich_attrs: dict[str, dict] = {}
+        self._control_block: dict = {}
         self._get_status(backend_data)
 
     def _load_config_from_attributes(self, data: dict) -> None:
@@ -1441,12 +1448,15 @@ class HaierWMBase(HaierDevice):
             else {}
         )
         self._enrich_attrs = enrich_attrs if isinstance(enrich_attrs, dict) else {}
+        command_name = None
         attributes = data.setdefault("attributes", [])
         self.attr_meta = {}
         for raw in attributes:
             code = str(raw.get("name", ""))
-            if not code:
+            if not code or not code.isdigit():
                 continue
+            if command_name is None and raw.get("commandName"):
+                command_name = str(raw["commandName"])
             enrich = self._enrich_attrs.get(code, {})
             list_titles = {}
             for value, item in enrich.get("list", {}).get("valueToIcon", {}).items():
@@ -1470,6 +1480,8 @@ class HaierWMBase(HaierDevice):
             }
             self.attr_meta[code] = meta
             self.attr_values[code] = str(meta["current"]) if meta["current"] is not None else ""
+        self._config = CFG.HaierWMConfig(command_name or "8")
+        self._control_block = data.get("controlBlock", {})
 
     def _set_attribute_value(self, code: str, value: str) -> None:
         code = str(code)
@@ -1482,16 +1494,20 @@ class HaierWMBase(HaierDevice):
         meta = self.attr_meta.get(str(code), {})
         return str(meta.get("description") or f"Param {code}")
 
+    SPECIAL_ATTR_CODES = {"0", "18", "19"}
+
     def get_attr_codes_for_sensor(self) -> list[str]:
-        result = [
-            code for code, meta in self.attr_meta.items()
-            if (
-                meta.get("readable")
-                and not meta.get("invisible")
-                and meta.get("type") == "STEP"
-            )
-        ]
         enrich_codes = set(self._enrich_attrs.keys())
+        result = []
+        for code, meta in self.attr_meta.items():
+            if code in self.SPECIAL_ATTR_CODES:
+                continue
+            if meta.get("type") != "STEP":
+                continue
+            if meta.get("invisible"):
+                continue
+            if meta.get("readable") or code in enrich_codes:
+                result.append(code)
         enriched = [code for code in result if code in enrich_codes]
         return enriched or result
 
@@ -1502,8 +1518,10 @@ class HaierWMBase(HaierDevice):
     def get_attr_codes_for_switch(self) -> list[str]:
         result = []
         for code, meta in self.attr_meta.items():
+            if code in self.SPECIAL_ATTR_CODES:
+                continue
             items = meta.get("list") or []
-            if not (meta.get("writable") and meta.get("type") == "LIST" and items):
+            if not (meta.get("readable") and meta.get("writable") and meta.get("type") == "LIST" and items):
                 continue
             if self._is_boolean_list(items):
                 result.append(code)
@@ -1514,8 +1532,10 @@ class HaierWMBase(HaierDevice):
     def get_attr_codes_for_select(self) -> list[str]:
         result = []
         for code, meta in self.attr_meta.items():
+            if code in self.SPECIAL_ATTR_CODES:
+                continue
             items = meta.get("list") or []
-            if not (meta.get("writable") and meta.get("type") == "LIST" and items):
+            if not (meta.get("readable") and meta.get("writable") and meta.get("type") == "LIST" and items):
                 continue
             if not self._is_boolean_list(items):
                 result.append(code)
@@ -1598,6 +1618,14 @@ class HaierWMBase(HaierDevice):
             entities.append(select.HaierWMProgramSelect(self))
         return entities
 
+    def create_entities_button(self) -> list:
+        from . import button
+        return [
+            button.HaierWMStartButton(self),
+            button.HaierWMPauseButton(self),
+            button.HaierWMCancelButton(self),
+        ]
+
     def create_entities_binary_sensor(self) -> list:
         from . import binary_sensor
         return [
@@ -1609,12 +1637,17 @@ class HaierWMBase(HaierDevice):
 
     @property
     def current_program(self) -> str:
-        return str(
+        title = (
             self.status_data.get("control", {})
             .get("currentProgram", {})
             .get("title")
-            or ""
         )
+        if title:
+            return str(title)
+        program_code = self.get_attr_value("0")
+        if program_code:
+            return self._program_name_by_template_id(program_code)
+        return ""
 
     @property
     def current_program_status(self) -> str:
@@ -1624,6 +1657,18 @@ class HaierWMBase(HaierDevice):
             .get("status")
             or ""
         )
+
+    def _program_name_by_template_id(self, template_id: str) -> str:
+        blocks = self.status_data.get("allProgram", {}).get("blocks", [])
+        for block in blocks:
+            for program in block.get("programs", []):
+                if str(program.get("templateId")) == str(template_id):
+                    return str(
+                        program.get("preview", {}).get("name")
+                        or program.get("detail", {}).get("name")
+                        or template_id
+                    )
+        return str(template_id)
 
     def get_program_options(self) -> list[str]:
         options = []
@@ -1653,15 +1698,46 @@ class HaierWMBase(HaierDevice):
                 if program_name != str(name):
                     continue
                 selected_values = program.get("programConfig", {}).get("selectedValues", [])
-                commands = [{
-                    "commandName": str(v.get("attrName")),
-                    "value": str(v.get("attrValue")),
-                } for v in selected_values if v.get("attrName") is not None]
+                if selected_values:
+                    commands = [{
+                        "commandName": str(v.get("attrName")),
+                        "value": str(v.get("attrValue")),
+                    } for v in selected_values if v.get("attrName") is not None]
+                else:
+                    template_id = program.get("templateId")
+                    if template_id is None:
+                        continue
+                    commands = [{"commandName": "0", "value": str(template_id)}]
                 if commands:
                     self._send_group_command(commands)
                     self.write_ha_state()
                     return True
         return False
+
+    def start_program(self) -> None:
+        self._send_single_command({"commandName": "19", "value": "2"})
+
+    def pause_program(self) -> None:
+        self._send_single_command({"commandName": "19", "value": "3"})
+
+    def resume_program(self) -> None:
+        resume_val = (
+            self._control_block.get("resumeProgram", {})
+            .get("resumeValue", "1")
+        )
+        self._send_single_command({"commandName": "19", "value": resume_val})
+
+    def cancel_program(self) -> None:
+        cancel_val = (
+            self._control_block.get("cancel", {})
+            .get("cancelValue", "1")
+        )
+        cancel_attr = (
+            self._control_block.get("cancel", {})
+            .get("link", {})
+            .get("name", "194")
+        )
+        self._send_single_command({"commandName": cancel_attr, "value": cancel_val})
 
     def get_attr_int(self, code: str, default: int = -1) -> int:
         try:
